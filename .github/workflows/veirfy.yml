@@ -1,15 +1,15 @@
-name: Verify (legacy + new)
+name: Verify
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
 jobs:
-  verify-both:
-    name: Verify legacy + new
+  verify:
+    name: Verify
     runs-on: ubuntu-latest
     env:
-      # Force Compose V2 (uses `docker compose`) by default; override if you need docker-compose v1
+      # Force Compose V2 (uses \`docker compose\`) by default; override if you need docker-compose v1
       COMPOSE_V2: "true"
 
     steps:
@@ -32,19 +32,21 @@ jobs:
       - name: Prepare .env for CI (do not leak secrets)
         run: |
           cp .env.example .env || true
-          if ! grep -q 'MYSQL_ROOT_PASSWORD' .env; then
-            echo "MYSQL_ROOT_PASSWORD=test_ci_pass" >> .env
+          # Standardize on MARIADB prefix for CI consistency
+          if ! grep -q 'MARIADB_ROOT_PASSWORD' .env; then
+            echo "MARIADB_ROOT_PASSWORD=test_ci_pass" >> .env
           fi
-          if ! grep -q '^TIMEZONE=' .env; then
-            echo "TIMEZONE=UTC" >> .env
+          if ! grep -q '^TimeZone=' .env; then
+            echo "TimeZone=UTC" >> .env
           fi
 
       - name: Make verify script executable
         run: |
-          chmod +x scripts/verify.sh || true
-          chmod +x .travis/verify-legacy.sh || true
+          chmod +x bin/*.sh || true
+          chmod +x .travis/verify.sh || true
 
       - name: Run verify (legacy + new)
         timeout-minutes: 20
         run: |
-          ./scripts/verify.sh all
+          # Use the standardized verification script
+          ./.travis/verify.sh all
