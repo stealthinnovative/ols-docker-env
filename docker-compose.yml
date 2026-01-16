@@ -23,6 +23,33 @@ services:
     networks:
       - default
 
+  phpmyadmin-fpm:
+    image: phpmyadmin/phpmyadmin:${PHPMYADMIN_IMAGE:-fpm-alpine}
+    container_name: phpmyadmin-fpm
+    env_file:
+      - .env
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_USER: ${MYSQL_USER}
+      PMA_PASSWORD: ${MYSQL_PASSWORD}
+      PHP_MEMORY_LIMIT: 512M
+      PMA_ABSOLUTE_URI: http://localhost/phpmyadmin/
+    volumes:
+      - ./logs/phpmyadmin:/var/log/phpmyadmin:delegated
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - default
+
   litespeed:
     image: litespeedtech/openlitespeed:${LITESPEED_IMAGE:-1.8.5-lsphp85}
     container_name: litespeed
@@ -35,7 +62,6 @@ services:
       - ./sites:/var/www/vhosts/
       - ./acme:/root/.acme.sh/
       - ./logs:/usr/local/lsws/logs/
-      - phpmyadmin-files:/usr/local/lsws/phpmyadmin
     ports:
       - "80:80"
       - "443:443"
@@ -49,32 +75,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      phpmyadmin-fpm:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7080/"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-    networks:
-      - default
-
-  phpmyadmin:
-    image: phpmyadmin/phpmyadmin:${PHPMYADMIN_IMAGE:-fpm-alpine}
-    container_name: phpmyadmin-fpm
-    env_file:
-      - .env
-    environment:
-      PMA_HOST: mysql
-      PMA_PORT: 3306
-      PMA_USER: ${MYSQL_USER}
-      PMA_PASSWORD: ${MYSQL_PASSWORD}
-    volumes:
-      - phpmyadmin-files:/phpmyadmin-files
-      #- ./lsws/php-fpm-pool.conf:/usr/local/etc/php-fpm.d/zzz-phpmyadmin.conf:ro
-    restart: always
-    depends_on:
-      mysql:
-        condition: service_healthy
     networks:
       - default
 
@@ -97,9 +105,6 @@ services:
       start_period: 10s
     networks:
       - default
-
-volumes:
-  phpmyadmin-files:
 
 networks:
   default:
