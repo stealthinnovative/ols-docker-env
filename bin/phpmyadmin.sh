@@ -3,44 +3,39 @@ set -e
 
 echo "🚀 Auto-configuring phpMyAdmin FPM + OpenLiteSpeed (localhost:8080)..."
 
-# 0. Load environment variables (KEEP YOUR .env)
-if [[ -f .env ]]; then
-  export $(grep -v '^#' .env | xargs)
+# 0. Fix .env path (script in /bin/, .env in parent)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="$PROJECT_ROOT/.env"
+cd "$PROJECT_ROOT"
+
+echo "📁 Project root: $PROJECT_ROOT"
+
+# Load .env from project root
+if [[ -f "$ENV_FILE" ]]; then
+  echo "✅ Loading .env from $ENV_FILE"
+  export $(grep -v '^#' "$ENV_FILE" | xargs)
 else
-  echo "❌ .env file not found"
+  echo "❌ .env not found at $ENV_FILE"
+  echo "Create .env with MYSQL_ROOT_PASSWORD, MYSQL_USER, etc."
   exit 1
 fi
 
 # 1. Create directories
-mkdir -p ./lsws ./lsws/conf/vhosts ./lsws/conf/templates
+mkdir -p lsws/conf/vhosts
 
-# 2. Create PHP-FPM pool config (ALL YOUR SPECS INTACT)
-cat > ./lsws/php-fpm-pool.conf << 'POOL_EOF'
-[phpmyadmin]
-user = www-data
-group = www-data
-listen = /var/run/phpmyadmin/phpmyadmin.sock
-listen.owner = www-data
-listen.group = www-data
-listen.mode = 0660
-pm = dynamic
-pm.max_children = 10
-pm.start_servers = 2
-pm.min_spare_servers = 1
-pm.max_spare_servers = 5
-php_admin_value[error_log] = /proc/self/fd/2
-php_admin_flag[log_errors] = on
-php_admin_value[memory_limit] = 512M
-POOL_EOF
+# 2. ✅ NO FPM POOL CONFIG - Use phpMyAdmin built-in (crash-free)
 
-# 3. ✅ FIXED: Correct OLS ExternalApp for FPM (lsphp → fpm)
-HTTPD_CONF="./lsws/conf/httpd_config.conf"
+# 3. ✅ FIXED ExternalApp for phpMyAdmin FPM default socket
+HTTPD_CONF="lsws/conf/httpd_config.conf"
+mkdir -p "$(dirname "$HTTPD_CONF")"
+
 if ! grep -q "externalApp phpmyadmin-fpm" "$HTTPD_CONF" 2>/dev/null; then
   cat >> "$HTTPD_CONF" << 'EOF'
 
 externalApp phpmyadmin-fpm {
   type            fpm
-  address         uds://var/run/phpmyadmin/phpmyadmin.sock
+  address         uds://var/run/php-fpm/phpmyadmin.sock
   maxConns        35
   initTimeout     60
   persistConn     1
@@ -49,10 +44,13 @@ externalApp phpmyadmin-fpm {
   extGroup        www-data
 }
 EOF
+  echo "✅ Added FPM ExternalApp"
 fi
 
-# 4. ✅ FIXED: phpMyAdmin vhost on port 8080 (YOUR REQUEST)
-PHPMYADMIN_VHOST="./lsws/conf/vhosts/phpmyadmin.conf"
+# 4. ✅ phpMyAdmin vhost + listener on 8080
+PHPMYADMIN_VHOST="lsws/conf/vhosts/phpmyadmin.conf"
+mkdir -p "$(dirname "$PHPMYADMIN_VHOST")"
+
 cat > "$PHPMYADMIN_VHOST" << 'EOF'
 virtualhost phpmyadmin {
   vhRoot                  $SERVER_ROOT/phpmyadmin
@@ -75,77 +73,89 @@ listener phpMyAdmin {
 }
 EOF
 
-# 5. Add listener to main config
-grep -q "include vhosts/phpmyadmin.conf" "$HTTPD_CONF" 2>/dev/null || 
-echo "include vhosts/phpmyadmin.conf" >> "$HTTPD_CONF"
+# Include vhost
+if ! grep -q "phpmyadmin.conf" "$HTTPD_CONF"; then
+  echo "include conf/vhosts/phpmyadmin.conf" >> "$HTTPD_CONF"
+fi
 
-# 6. Start services (YOUR ORDER)
+# 5. Start services
+echo "🐳 Starting services..."
 docker compose down phpmyadmin litespeed 2>/dev/null || true
 sleep 2
 docker compose up -d mysql redis phpmyadmin litespeed
 
-# 7. Wait for FPM socket
-echo "⏳ Waiting for FPM socket..."
+# 6. Wait for FPM socket (phpMyAdmin default path)
+echo "⏳ Waiting for phpMyAdmin FPM socket..."
 sleep 5
-until docker compose exec litespeed ls /var/run/phpmyadmin/phpmyadmin.sock >/dev/null 2>&1; do
-  echo "⏳ FPM socket not ready, waiting..."
+until docker compose exec litespeed ls /var/run/php-fpm/phpmyadmin.sock >/dev/null 2>&1; do
+  echo "⏳ Socket not ready (checking phpmyadmin logs...)"
+  docker compose logs phpmyadmin | tail -3
   sleep 2
 done
-echo "✅ FPM socket ready!"
+echo "✅ FPM socket ready at /var/run/php-fpm/phpmyadmin.sock"
 
-# 8. Deploy phpMyAdmin files (phpmyadmin:fpm-alpine → litespeed)
-echo "📦 Deploying phpMyAdmin files..."
+# 7. Copy phpMyAdmin files from FPM container
+echo "📦 Copying phpMyAdmin files..."
 TEMP_DIR="/tmp/phpmyadmin-files-$$"
 mkdir -p "$TEMP_DIR"
 
-# Copy from phpmyadmin FPM container
-docker compose cp phpmyadmin:/var/www/html/. "$TEMP_DIR/" 2>/dev/null || {
-  echo "  ⚠️ docker cp failed, using tar..."
+# From phpmyadmin → host
+if ! docker compose cp phpmyadmin:/var/www/html/. "$TEMP_DIR/"; then
+  echo "  → Using tar fallback..."
   docker compose exec -T phpmyadmin sh -c "tar -czf - -C /var/www/html ." | tar -xzf - -C "$TEMP_DIR"
-}
+fi
 
-# Copy to litespeed
+# Host → litespeed
 docker compose exec litespeed mkdir -p /usr/local/lsws/phpmyadmin
-docker compose cp "$TEMP_DIR/." litespeed:/usr/local/lsws/phpmyadmin/ 2>/dev/null || {
-  echo "  ⚠️ docker cp failed, using tar..."
+if ! docker compose cp "$TEMP_DIR/." litespeed:/usr/local/lsws/phpmyadmin/; then
+  echo "  → Using tar fallback..."
   (cd "$TEMP_DIR" && tar -czf - .) | docker compose exec -i litespeed sh -c "cd /usr/local/lsws/phpmyadmin && tar -xzf -"
-}
+fi
 
 docker compose exec litespeed chown -R lsadm:lsadm /usr/local/lsws/phpmyadmin
 rm -rf "$TEMP_DIR"
+echo "✅ phpMyAdmin files deployed"
 
-# 9. Restart OLS
+# 8. Restart OpenLiteSpeed
 echo "🔄 Restarting OpenLiteSpeed..."
 docker compose exec litespeed /usr/local/lsws/bin/lswsctrl restart
 sleep 5
 
-# 10. Fix PMA_HOST (if needed)
-if ! grep -q "PMA_HOST: mysql:3306" docker-compose.yml; then
+# 9. Fix PMA_HOST if needed
+if ! grep -q "PMA_HOST:.*3306" docker-compose.yml; then
   sed -i '/PMA_HOST:/c\PMA_HOST: mysql:3306' docker-compose.yml
+  echo "✅ Fixed PMA_HOST: mysql:3306"
   docker compose up -d phpmyadmin
+  sleep 3
 fi
 
-# 11. Test MySQL connectivity
-echo "🔐 Testing MySQL connections..."
-docker compose exec phpmyadmin mysql -h mysql -P 3306 -u root -p${MYSQL_ROOT_PASSWORD} -e "SELECT 1;" >/dev/null 2>&1 &&
-echo "✅ MySQL root connection OK" || echo "⚠️ MySQL root check failed"
+# 10. Test MySQL connectivity
+echo "🔐 Testing MySQL from phpMyAdmin..."
+if docker compose exec phpmyadmin mysql -h mysql -P 3306 -u root -p${MYSQL_ROOT_PASSWORD} -e "SELECT 1;" >/dev/null 2>&1; then
+  echo "✅ MySQL root connection OK"
+else
+  echo "⚠️ MySQL root test failed (check MYSQL_ROOT_PASSWORD)"
+fi
 
-# 12. Final test
+# 11. Final test
 echo "🌐 Testing http://localhost:8080..."
 sleep 3
 if curl -fs http://localhost:8080 >/dev/null 2>&1; then
   echo ""
   echo "🎉 SUCCESS! phpMyAdmin LIVE at http://localhost:8080"
   echo "═══════════════════════════════════════"
-  echo "👤 Login: root / ${MYSQL_ROOT_PASSWORD}"
-  echo "📊 Services: $(docker compose ps | grep Up)"
+  echo "👤 root / ${MYSQL_ROOT_PASSWORD}"
+  echo "👤 ${MYSQL_USER} / ${MYSQL_PASSWORD}"
+  echo "📊 docker compose ps"
+  docker compose ps
   echo "═══════════════════════════════════════"
 else
-  echo "❌ phpMyAdmin not responding. Debug:"
-  echo "   docker compose logs litespeed | tail -20"
-  echo "   docker compose logs phpmyadmin | tail -20"
-  docker compose exec litespeed ls -la /var/run/phpmyadmin/
+  echo "❌ phpMyAdmin not accessible"
+  echo "🔍 Debug:"
+  echo "  docker compose logs litespeed | tail -20"
+  echo "  docker compose logs phpmyadmin | tail -20"
+  echo "  docker compose exec litespeed ls -la /var/run/php-fpm/"
   exit 1
 fi
 
-echo "✅ COMPLETE! Your FPM + OpenLiteSpeed stack is production-ready."
+echo "✅ phpMyAdmin FPM + OpenLiteSpeed setup COMPLETE!"
