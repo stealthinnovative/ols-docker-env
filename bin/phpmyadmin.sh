@@ -87,7 +87,7 @@ docker compose up -d mysql redis phpmyadmin litespeed
 # 6. Wait for FPM socket (phpMyAdmin default path)
 echo "⏳ Waiting for phpMyAdmin FPM socket..."
 sleep 5
-until docker compose exec litespeed ls /var/run/php-fpm/phpmyadmin.sock >/dev/null 2>&1; do
+until docker compose exec litespeed ls /run/php/php-fpm.sock >/dev/null 2>&1; do
   echo "⏳ Socket not ready (checking phpmyadmin logs...)"
   docker compose logs phpmyadmin | tail -3
   sleep 2
