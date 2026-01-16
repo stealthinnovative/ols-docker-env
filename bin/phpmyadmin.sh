@@ -108,6 +108,40 @@ docker compose exec litespeed ln -sf \
   /var/www/vhosts/localhost/html/phpmyadmin
 
 ############################################
+# 6. Deploy phpMyAdmin files to LiteSpeed
+############################################
+echo "📦 Deploying phpMyAdmin files..."
+sleep 5
+
+TEMP_DIR="/tmp/phpmyadmin-files-$$"
+mkdir -p "$TEMP_DIR"
+
+echo "  → Copying phpMyAdmin files to host temp dir..."
+docker compose cp phpmyadmin:/var/www/html/. "$TEMP_DIR/" 2>/dev/null || {
+  echo "  ⚠️  docker compose cp failed, using tar fallback..."
+  docker compose exec -T phpmyadmin sh -c \
+    "tar -czf - -C /var/www/html ." | tar -xzf - -C "$TEMP_DIR"
+}
+
+echo "  → Copying files from host to LiteSpeed container..."
+docker compose exec litespeed mkdir -p /usr/local/lsws/phpmyadmin
+docker compose cp "$TEMP_DIR/." litespeed:/usr/local/lsws/phpmyadmin/ 2>/dev/null || {
+  echo "  ⚠️  docker compose cp failed, using tar fallback..."
+  (cd "$TEMP_DIR" && tar -czf - .) | \
+    docker compose exec -i litespeed sh -c \
+      "cd /usr/local/lsws/phpmyadmin && tar -xzf -"
+}
+
+echo "  → Fixing permissions..."
+docker compose exec litespeed chown -R lsadm:lsadm /usr/local/lsws/phpmyadmin
+
+echo "  → Creating vhost symlink..."
+docker compose exec litespeed ln -sf \
+  /usr/local/lsws/phpmyadmin \
+  /var/www/vhosts/localhost/html/phpmyadmin
+
+rm -rf "$TEMP_DIR"
+############################################
 # 7. Restart OpenLiteSpeed
 ############################################
 echo "🔄 Restarting OpenLiteSpeed..."
