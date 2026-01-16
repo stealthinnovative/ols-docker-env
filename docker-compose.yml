@@ -75,6 +75,7 @@ services:
       - ./lsws/admin-conf:/usr/local/lsws/admin/conf
       - ./bin/container:/usr/local/bin
       - ./sites:/var/www/vhosts/
+      - ./phpmyadmin:/var/www/phpmyadmin:delegated    # ← phpMyAdmin website
       - ./acme:/root/.acme.sh/
       - ./logs:/usr/local/lsws/logs/
     ports:
