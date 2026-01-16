@@ -35,21 +35,16 @@ services:
       - ./sites:/var/www/vhosts/
       - ./acme:/root/.acme.sh/
       - ./logs:/usr/local/lsws/logs/
-      - phpmyadmin-sockets:/var/run/phpmyadmin
+      - ./phpmyadmin:/var/www/vhosts/phpmyadmin
     ports:
       - 80:80
       - 443:443
       - 443:443/udp
       - 7080:7080
-      - 8080:8080                    # ✅ localhost:8080
+      - 8080:8080
     restart: always
     environment:
       TZ: ${TIMEZONE}
-    depends_on:
-      mysql:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7080/"]
       interval: 30s
@@ -65,13 +60,18 @@ services:
     env_file:
       - .env
     environment:
-      PMA_HOST: mysql:3306            # ✅ TCP fix
-    volumes:
-      - phpmyadmin-sockets:/var/run/phpmyadmin  # ✅ ONLY socket volume
-    restart: always
-    depends_on:
-      mysql:
-        condition: service_healthy
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_USER: ${MYSQL_USER}
+      PMA_PASSWORD: ${MYSQL_PASSWORD}
+      UPLOAD_LIMIT: 512M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep php-fpm || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       - default
 
@@ -94,9 +94,6 @@ services:
       start_period: 10s
     networks:
       - default
-
-volumes:
-  phpmyadmin-sockets:
 
 networks:
   default:
