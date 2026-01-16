@@ -39,8 +39,13 @@ externalApp phpmyadmin-fpm {
 EOF
 
 # 3. Auto-detect vhost and add context
-VHOST_DIR=$(find ./lsws/conf/vhosts -name "*.conf" -o -name "vhconf.conf" | head -1 | xargs dirname)
-VHOST_CONF="$VHOST_DIR/vhconf.conf"
+VHOST_FILE=$(find ./lsws/conf/vhosts -name "*.conf" -o -name "vhconf.conf" 2>/dev/null | head -1)
+if [[ -n "$VHOST_FILE" ]]; then
+  VHOST_DIR=$(dirname "$VHOST_FILE")
+  VHOST_CONF="$VHOST_DIR/vhconf.conf"
+else
+  VHOST_CONF=""
+fi
 
 if [[ ! -f "$VHOST_CONF" ]]; then
   echo "⚠️  No vhost conf found, creating default..."
