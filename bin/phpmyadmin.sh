@@ -14,16 +14,21 @@ else
 fi
 
 ############################################
-# 1. Create directories
+# 1. Create required directories
 ############################################
 mkdir -p ./lsws ./lsws/conf/vhosts ./lsws/conf/templates
 
 ############################################
 # 2. Create PHP-FPM pool (OLS ↔ phpMyAdmin)
 ############################################
-rm -f ./lsws/php-fpm-pool.conf
+POOL_CONF="./lsws/php-fpm-pool.conf"
 
-cat > ./lsws/php-fpm-pool.conf << 'POOL_EOF'
+if [[ -e "$POOL_CONF" ]]; then
+  echo "🧹 Removing existing php-fpm-pool.conf"
+  rm -rf "$POOL_CONF"
+fi
+
+cat > "$POOL_CONF" << 'POOL_EOF'
 [phpmyadmin]
 user = www-data
 group = www-data
@@ -43,7 +48,7 @@ php_admin_flag[log_errors] = on
 POOL_EOF
 
 ############################################
-# 3. Register externalApp in OLS
+# 3. Register externalApp in OLS (idempotent)
 ############################################
 HTTPD_CONF="./lsws/conf/httpd_config.conf"
 
@@ -94,21 +99,7 @@ sleep 2
 docker compose up -d mysql redis phpmyadmin litespeed
 
 ############################################
-# 6. Deploy phpMyAdmin files to LiteSpeed
-############################################
-echo "📦 Deploying phpMyAdmin files..."
-sleep 5
-
-docker compose exec litespeed mkdir -p /usr/local/lsws/phpmyadmin
-docker compose cp phpmyadmin:/var/www/html/. litespeed:/usr/local/lsws/phpmyadmin/
-
-docker compose exec litespeed chown -R lsadm:lsadm /usr/local/lsws/phpmyadmin
-docker compose exec litespeed ln -sf \
-  /usr/local/lsws/phpmyadmin \
-  /var/www/vhosts/localhost/html/phpmyadmin
-
-############################################
-# 6. Deploy phpMyAdmin files to LiteSpeed
+# 6. Deploy phpMyAdmin files (CORRECT WAY)
 ############################################
 echo "📦 Deploying phpMyAdmin files..."
 sleep 5
@@ -116,76 +107,14 @@ sleep 5
 TEMP_DIR="/tmp/phpmyadmin-files-$$"
 mkdir -p "$TEMP_DIR"
 
-echo "  → Copying phpMyAdmin files to host temp dir..."
+echo "  → Copying from phpMyAdmin container to host..."
 docker compose cp phpmyadmin:/var/www/html/. "$TEMP_DIR/" 2>/dev/null || {
-  echo "  ⚠️  docker compose cp failed, using tar fallback..."
+  echo "  ⚠️  docker cp failed, using tar fallback..."
   docker compose exec -T phpmyadmin sh -c \
     "tar -czf - -C /var/www/html ." | tar -xzf - -C "$TEMP_DIR"
 }
 
-echo "  → Copying files from host to LiteSpeed container..."
+echo "  → Copying from host to LiteSpeed container..."
 docker compose exec litespeed mkdir -p /usr/local/lsws/phpmyadmin
 docker compose cp "$TEMP_DIR/." litespeed:/usr/local/lsws/phpmyadmin/ 2>/dev/null || {
-  echo "  ⚠️  docker compose cp failed, using tar fallback..."
-  (cd "$TEMP_DIR" && tar -czf - .) | \
-    docker compose exec -i litespeed sh -c \
-      "cd /usr/local/lsws/phpmyadmin && tar -xzf -"
-}
-
-echo "  → Fixing permissions..."
-docker compose exec litespeed chown -R lsadm:lsadm /usr/local/lsws/phpmyadmin
-
-echo "  → Creating vhost symlink..."
-docker compose exec litespeed ln -sf \
-  /usr/local/lsws/phpmyadmin \
-  /var/www/vhosts/localhost/html/phpmyadmin
-
-rm -rf "$TEMP_DIR"
-############################################
-# 7. Restart OpenLiteSpeed
-############################################
-echo "🔄 Restarting OpenLiteSpeed..."
-docker compose exec litespeed /usr/local/lsws/bin/lswsctrl restart || true
-sleep 5
-
-############################################
-# 8. TEST: phpMyAdmin → MySQL TCP login (ROOT)
-############################################
-echo ""
-echo "🔐 Testing phpMyAdmin → MySQL TCP login (root)..."
-
-if docker compose exec -T phpmyadmin \
-  mysql -h mysql -P 3306 -u root \
-  --password="${MYSQL_ROOT_PASSWORD}" \
-  -e "SELECT 1;" >/dev/null 2>&1; then
-
-  echo "✅ SUCCESS: phpMyAdmin can connect to MySQL as root over TCP"
-else
-  echo "❌ FAILURE: phpMyAdmin CANNOT connect to MySQL as root"
-  echo ""
-  echo "🔍 Diagnostics:"
-  docker compose exec phpmyadmin env | grep PMA_
-  echo ""
-  echo "➡️  Check root host permissions:"
-  echo "    docker compose exec mysql mysql -u root -p -e \"SELECT Host,User FROM mysql.user WHERE User='root';\""
-  exit 1
-fi
-
-############################################
-# 9. Final Web Test
-############################################
-echo ""
-echo "🌐 Verifying web access..."
-
-if curl -fs http://localhost/phpmyadmin >/dev/null; then
-  echo "🎉 phpMyAdmin READY"
-  echo ""
-  echo "➡️  URL:      http://localhost/phpmyadmin"
-  echo "➡️  Username: root"
-  echo "➡️  Password: MYSQL_ROOT_PASSWORD (.env)"
-  echo "➡️  Server:   (leave empty)"
-else
-  echo "❌ phpMyAdmin web interface not responding"
-  docker compose logs phpmyadmin litespeed | tail -50
-  exit 1
-fi
+  echo "  ⚠️  docker cp failed, using tar fallb
