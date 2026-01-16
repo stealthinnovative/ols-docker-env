@@ -35,13 +35,12 @@ services:
       - ./sites:/var/www/vhosts/
       - ./acme:/root/.acme.sh/
       - ./logs:/usr/local/lsws/logs/
-      - phpmyadmin-sockets:/var/run/phpmyadmin
       - phpmyadmin-files:/usr/local/lsws/phpmyadmin
     ports:
-      - 80:80
-      - 443:443
-      - 443:443/udp
-      - 7080:7080
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+      - "7080:7080"
     restart: always
     environment:
       TZ: ${TIMEZONE}
@@ -66,11 +65,10 @@ services:
       - .env
     environment:
       PMA_HOST: mysql
-      PMA_PORT: 3306                    # ← ADDED (1/3)
-      PMA_USER: ${MYSQL_USER}           # ← ADDED (2/3)
-      PMA_PASSWORD: ${MYSQL_PASSWORD}   # ← ADDED (3/3)
+      PMA_PORT: 3306
+      PMA_USER: ${MYSQL_USER}
+      PMA_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
-      - phpmyadmin-sockets:/var/run/phpmyadmin
       - phpmyadmin-files:/phpmyadmin-files
       - ./lsws/php-fpm-pool.conf:/usr/local/etc/php-fpm.d/zzz-phpmyadmin.conf:ro
     restart: always
@@ -101,7 +99,6 @@ services:
       - default
 
 volumes:
-  phpmyadmin-sockets:
   phpmyadmin-files:
 
 networks:
