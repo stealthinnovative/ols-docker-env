@@ -65,11 +65,12 @@ externalApp phpmyadmin-fpm {
 EOF
 
 ############################################
-# 4. Add phpMyAdmin context to docker template
+# 4. Add phpMyAdmin context to docker template (FIXED)
 ############################################
 TEMPLATE_FILE="./lsws/conf/templates/docker.conf"
 
 if ! grep -q "context /phpmyadmin" "$TEMPLATE_FILE" 2>/dev/null; then
+  echo "📝 Adding phpMyAdmin context to template..."
   sed -i.bak '$d' "$TEMPLATE_FILE" 2>/dev/null || true
   cat >> "$TEMPLATE_FILE" << 'EOF'
 
@@ -86,7 +87,6 @@ if ! grep -q "context /phpmyadmin" "$TEMPLATE_FILE" 2>/dev/null; then
       allow *
     }
   }
-}
 EOF
 fi
 
@@ -99,7 +99,7 @@ sleep 2
 docker compose up -d mysql redis phpmyadmin litespeed
 
 ############################################
-# 6. Deploy phpMyAdmin files (CORRECT WAY)
+# 6. Deploy phpMyAdmin files (ROBUST)
 ############################################
 echo "📦 Deploying phpMyAdmin files..."
 sleep 5
@@ -117,4 +117,85 @@ docker compose cp phpmyadmin:/var/www/html/. "$TEMP_DIR/" 2>/dev/null || {
 echo "  → Copying from host to LiteSpeed container..."
 docker compose exec litespeed mkdir -p /usr/local/lsws/phpmyadmin
 docker compose cp "$TEMP_DIR/." litespeed:/usr/local/lsws/phpmyadmin/ 2>/dev/null || {
-  echo "  ⚠️  docker cp failed, using tar fallb
+  echo "  ⚠️  docker cp failed, using tar fallback..."
+  (cd "$TEMP_DIR" && tar -czf - .) | \
+    docker compose exec -i litespeed sh -c \
+      "cd /usr/local/lsws/phpmyadmin && tar -xzf -"
+}
+
+docker compose exec litespeed chown -R lsadm:lsadm /usr/local/lsws/phpmyadmin
+docker compose exec litespeed ln -sf \
+  /usr/local/lsws/phpmyadmin \
+  /var/www/vhosts/localhost/html/phpmyadmin
+
+rm -rf "$TEMP_DIR"
+
+############################################
+# 7. Restart OpenLiteSpeed
+############################################
+echo "🔄 Restarting OpenLiteSpeed..."
+docker compose exec litespeed /usr/local/lsws/bin/lswsctrl restart || true
+sleep 5
+
+############################################
+# 8. FIX PMA_HOST in docker-compose.yml
+############################################
+echo "🔧 Ensuring PMA_HOST uses TCP (fixes socket error)..."
+if ! grep -q "PMA_HOST: mysql:3306" docker-compose.yml; then
+  sed -i '/PMA_HOST:/c\PMA_HOST: mysql:3306' docker-compose.yml
+  echo "✅ Added PMA_HOST: mysql:3306 to docker-compose.yml"
+  docker compose up -d phpmyadmin litespeed
+  sleep 3
+fi
+
+############################################
+# 9. TEST: phpMyAdmin → MySQL TCP login (ROOT + APP USER)
+############################################
+echo "🔐 Testing phpMyAdmin → MySQL TCP connections..."
+
+# Test root
+if docker compose exec -T phpmyadmin \
+  mysql -h mysql -P 3306 -u root \
+  --password="${MYSQL_ROOT_PASSWORD}" \
+  -e "SELECT 1;" >/dev/null 2>&1; then
+  echo "✅ SUCCESS: MySQL root login over TCP works"
+else
+  echo "❌ FAILURE: Root connection failed"
+  docker compose logs mysql | tail -10
+  exit 1
+fi
+
+# Test app user
+if docker compose exec -T phpmyadmin \
+  mysql -h mysql -P 3306 -u "${MYSQL_USER}" \
+  --password="${MYSQL_PASSWORD}" wordpress \
+  -e "SELECT 1;" >/dev/null 2>&1; then
+  echo "✅ SUCCESS: MySQL app user (${MYSQL_USER}) login works"
+else
+  echo "❌ FAILURE: App user connection failed"
+  echo "➡️  Run: docker compose exec mysql mariadb -u root -p -e \"GRANT ALL ON wordpress.* TO '${MYSQL_USER}'@'%';\""
+  exit 1
+fi
+
+############################################
+# 10. Final web check (Port 80)
+############################################
+echo "🌐 Verifying web access (port 80)..."
+
+if curl -fs http://localhost/phpmyadmin >/dev/null; then
+  echo ""
+  echo "🎉 SUCCESS: phpMyAdmin is LIVE!"
+  echo "═══════════════════════════════════════"
+  echo "🌐 URL:          http://localhost/phpmyadmin"
+  echo "👤 Root Login:   root / ${MYSQL_ROOT_PASSWORD}"
+  echo "👤 App Login:    ${MYSQL_USER} / ${MYSQL_PASSWORD}"
+  echo "═══════════════════════════════════════"
+else
+  echo "❌ phpMyAdmin web interface not responding"
+  echo "🔍 Troubleshooting:"
+  echo "  docker compose logs litespeed | tail -20"
+  echo "  docker compose logs phpmyadmin | tail -20"
+  exit 1
+fi
+
+echo "✅ phpMyAdmin FPM + OpenLiteSpeed setup COMPLETE!"
