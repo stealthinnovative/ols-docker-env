@@ -9,14 +9,56 @@ services:
     volumes:
       - "./data/db:/var/lib/mysql:delegated"
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-your_super_secure_root_password_123}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wordpress}
+      MYSQL_USER: ${MYSQL_USER:-wpuser}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-WpPassword123}
     restart: always
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    networks:
+      - default
+    ports:
+      - "3306:3306"
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:alpine}
+    logging:
+      driver: none
+    volumes:
+      - ./redis/data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+    environment:
+      - REDIS_REPLICATION_MODE=master
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - default
+    ports:
+      - "6379:6379"
+
+  phpmyadmin-fpm:
+    image: phpmyadmin/phpmyadmin:fpm-alpine
+    container_name: phpmyadmin-fpm
+    command: sh -c "apk add --no-cache mariadb-client php82-mysqli && php-fpm"
+    volumes:
+      - ./phpmyadmin:/var/www/html:delegated
+      - ./phpmyadmin/config.user.inc.php:/etc/phpmyadmin/config.user.inc.php:ro
+    expose:
+      - "9000"
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9000 || exit 1"]
+      interval: 15s
       timeout: 5s
       retries: 5
       start_period: 30s
@@ -35,68 +77,23 @@ services:
       - ./sites:/var/www/vhosts/
       - ./acme:/root/.acme.sh/
       - ./logs:/usr/local/lsws/logs/
-      - phpmyadmin-sockets:/var/run/phpmyadmin
     ports:
       - 80:80
       - 443:443
       - 443:443/udp
-      - 7080:7080
-      - 8080:8080                    # ✅ localhost:8080
+      - 7080:7080      # OLS WebAdmin
+      - 8080:8080      # phpMyAdmin vhost
     restart: always
     environment:
-      TZ: ${TIMEZONE}
-    depends_on:
-      mysql:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      TZ: ${TIMEZONE:-America/Honolulu}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7080/"]
-      interval: 30s
+      test: ["CMD-SHELL", "curl -f http://localhost:7080/ || exit 1"]
+      interval: 20s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 4
+      start_period: 50s
     networks:
       - default
-
-  phpmyadmin:
-    image: phpmyadmin/phpmyadmin:${PHPMYADMIN_IMAGE:-fpm-alpine}
-    container_name: phpmyadmin-fpm
-    env_file:
-      - .env
-    environment:
-      PMA_HOST: mysql:3306            # ✅ TCP fix
-    volumes:
-      - phpmyadmin-sockets:/var/run/phpmyadmin  # ✅ ONLY socket volume
-    restart: always
-    depends_on:
-      mysql:
-        condition: service_healthy
-    networks:
-      - default
-
-  redis:
-    image: ${REDIS_IMAGE:-redis:alpine}
-    logging:
-      driver: none
-    command: redis-server /usr/local/etc/redis/redis.conf
-    volumes:
-      - ./redis/data:/data
-      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
-    environment:
-      - REDIS_REPLICATION_MODE=master
-    restart: always
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
-    networks:
-      - default
-
-volumes:
-  phpmyadmin-sockets:
 
 networks:
   default:
