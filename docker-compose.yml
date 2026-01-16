@@ -70,7 +70,7 @@ services:
       PMA_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
       - phpmyadmin-files:/phpmyadmin-files
-      - ./lsws/php-fpm-pool.conf:/usr/local/etc/php-fpm.d/zzz-phpmyadmin.conf:ro
+      #- ./lsws/php-fpm-pool.conf:/usr/local/etc/php-fpm.d/zzz-phpmyadmin.conf:ro
     restart: always
     depends_on:
       mysql:
