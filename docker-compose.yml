@@ -4,8 +4,8 @@ services:
     logging:
       driver: none
     command:
-      - "--max-allowed-packet=512M"              # Original dev's proven value
-      - "--max-connections=${MARIADB_MAX_CONNS:-200}"  # 200 default, 400 for 8GB+
+      - "--max-allowed-packet=512M"
+      - "--max-connections=${MARIADB_MAX_CONNS:-200}"
     volumes:
       - "./data/db:/var/lib/mysql:delegated"
     environment:
@@ -14,6 +14,12 @@ services:
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     restart: always
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
       - default
 
@@ -29,6 +35,7 @@ services:
       - ./sites:/var/www/vhosts/
       - ./acme:/root/.acme.sh/
       - ./logs:/usr/local/lsws/logs/
+      - phpmyadmin-sockets:/var/run/phpmyadmin
     ports:
       - 80:80
       - 443:443
@@ -37,18 +44,34 @@ services:
     restart: always
     environment:
       TZ: ${TIMEZONE}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     networks:
       - default
 
   phpmyadmin:
-    image: phpmyadmin/phpmyadmin:${PHPMYADMIN_IMAGE:-latest}
+    image: phpmyadmin/phpmyadmin:${PHPMYADMIN_IMAGE:-fpm-alpine}
+    container_name: phpmyadmin-fpm
     env_file:
       - .env
-    ports:
-      - 8080:80
     environment:
       PMA_HOST: mysql
+    volumes:
+      - phpmyadmin-sockets:/var/run/phpmyadmin
+      - ./lsws/php-fpm-pool.conf:/usr/local/etc/php-fpm.d/zzz-phpmyadmin.conf:ro
     restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
     networks:
       - default
 
@@ -56,15 +79,24 @@ services:
     image: ${REDIS_IMAGE:-redis:alpine}
     logging:
       driver: none
-    # command: redis-server --requirepass 8b405f60665e48f795752e534d93b722
+    command: redis-server /usr/local/etc/redis/redis.conf
     volumes:
       - ./redis/data:/data
       - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
     environment:
       - REDIS_REPLICATION_MODE=master
     restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     networks:
       - default
+
+volumes:
+  phpmyadmin-sockets:
 
 networks:
   default:
