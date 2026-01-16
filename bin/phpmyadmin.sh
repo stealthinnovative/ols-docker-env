@@ -7,6 +7,13 @@ echo "🚀 Auto-configuring phpMyAdmin FPM + OpenLiteSpeed..."
 mkdir -p ./lsws ./lsws/conf/vhosts
 
 # 1a. Create php-fpm pool configuration to ensure socket is created at correct path
+# Remove if it exists as a directory or file
+if [[ -d ./lsws/php-fpm-pool.conf ]]; then
+  rm -rf ./lsws/php-fpm-pool.conf
+elif [[ -f ./lsws/php-fpm-pool.conf ]]; then
+  rm -f ./lsws/php-fpm-pool.conf
+fi
+
 cat > ./lsws/php-fpm-pool.conf << 'POOL_EOF'
 [phpmyadmin]
 user = www-data
@@ -38,40 +45,42 @@ externalApp phpmyadmin-fpm {
 }
 EOF
 
-# 3. Auto-detect vhost and add context
-VHOST_FILE=$(find ./lsws/conf/vhosts -name "*.conf" -o -name "vhconf.conf" 2>/dev/null | head -1)
-if [[ -n "$VHOST_FILE" ]]; then
-  VHOST_DIR=$(dirname "$VHOST_FILE")
-  VHOST_CONF="$VHOST_DIR/vhconf.conf"
-else
-  VHOST_CONF=""
+# 3. Add phpMyAdmin context to docker template (used by localhost vhost)
+TEMPLATE_FILE="./lsws/conf/templates/docker.conf"
+if [[ ! -f "$TEMPLATE_FILE" ]]; then
+  echo "⚠️  Template file not found, creating directory..."
+  mkdir -p "$(dirname "$TEMPLATE_FILE")"
 fi
 
-if [[ ! -f "$VHOST_CONF" ]]; then
-  echo "⚠️  No vhost conf found, creating default..."
-  VHOST_CONF="./lsws/conf/vhosts/default/vhconf.conf"
-  mkdir -p "$(dirname "$VHOST_CONF")"
-  echo "virtualhost default { }" > "$VHOST_CONF"
-fi
-
-# Backup and append context
-cp "$VHOST_CONF" "${VHOST_CONF}.bak" 2>/dev/null || true
-cat >> "$VHOST_CONF" << 'EOF'
-
-context /phpmyadmin {
-  type                    php
-  location                $SERVER_ROOT/phpmyadmin/
-  indexFiles              index.php
+# Check if context already exists
+if ! grep -q "context /phpmyadmin" "$TEMPLATE_FILE" 2>/dev/null; then
+  # Backup template
+  cp "$TEMPLATE_FILE" "${TEMPLATE_FILE}.bak" 2>/dev/null || true
   
-  phpConfig {
-    pool                phpmyadmin-fpm
-  }
-  
-  accessControl {
-    allow                 *
+  # Add context before the closing brace of the template
+  # Remove the last closing brace, add context, then add closing brace back
+  sed -i.bak '$d' "$TEMPLATE_FILE" 2>/dev/null || true
+  cat >> "$TEMPLATE_FILE" << 'EOF'
+
+  context /phpmyadmin {
+    type                    php
+    location                $DOC_ROOT/phpmyadmin/
+    indexFiles              index.php
+    
+    phpConfig {
+      pool                phpmyadmin-fpm
+    }
+    
+    accessControl {
+      allow                 *
+    }
   }
 }
 EOF
+  echo "✅ Added phpMyAdmin context to docker template"
+else
+  echo "ℹ️  phpMyAdmin context already exists in template"
+fi
 
 # 4. Ensure correct docker-compose.yml volume mapping (using named volume for cross-platform compatibility)
 if ! grep -q "phpmyadmin-sockets:" docker-compose.yml; then
@@ -90,9 +99,74 @@ if ! grep -q "phpmyadmin-sockets:" docker-compose.yml; then
 fi
 
 # 5. Deploy services
-docker-compose down phpmyadmin litespeed 2>/dev/null || true
+docker compose down phpmyadmin litespeed 2>/dev/null || true
 sleep 2
-docker-compose up -d phpmyadmin litespeed mysql redis
+docker compose up -d phpmyadmin litespeed mysql redis
+
+# 5a. Copy phpMyAdmin files to LiteSpeed (using host as intermediary)
+echo "📦 Copying phpMyAdmin files..."
+sleep 5  # Wait for phpMyAdmin container to be ready
+
+# Create temp directory on host
+TEMP_DIR="/tmp/phpmyadmin-files-$$"
+mkdir -p "$TEMP_DIR"
+
+# Copy from phpMyAdmin container to host
+echo "  Copying from phpMyAdmin container to host..."
+docker compose cp phpmyadmin:/var/www/html/. "$TEMP_DIR/" 2>/dev/null || {
+  echo "  ⚠️  Direct copy failed, trying alternative method..."
+  docker compose exec -T phpmyadmin sh -c "tar -czf - -C /var/www/html ." | tar -xzf - -C "$TEMP_DIR" 2>/dev/null || true
+}
+
+# Copy from host to LiteSpeed container
+echo "  Copying from host to LiteSpeed container..."
+docker compose cp "$TEMP_DIR/." litespeed:/usr/local/lsws/phpmyadmin/ 2>/dev/null || {
+  echo "  ⚠️  Direct copy failed, trying exec method..."
+  docker compose exec -T litespeed sh -c "mkdir -p /usr/local/lsws/phpmyadmin" || true
+  cd "$TEMP_DIR" && tar -czf - . | docker compose exec -i litespeed sh -c "cd /usr/local/lsws/phpmyadmin && tar -xzf -" || true
+  cd - > /dev/null
+}
+
+# Fix permissions
+echo "  Fixing permissions..."
+docker compose exec litespeed chown -R lsadm:lsadm /usr/local/lsws/phpmyadmin 2>/dev/null || true
+
+# Create symlink in vhost document root (required for $DOC_ROOT to work)
+echo "  Creating symlink in vhost document root..."
+docker compose exec litespeed sh -c "ln -sf /usr/local/lsws/phpmyadmin /var/www/vhosts/localhost/html/phpmyadmin" 2>/dev/null || true
+
+# Clean up temp directory
+rm -rf "$TEMP_DIR"
+
+# 5b. If template wasn't found earlier, try adding context now
+if [[ ! -f "$TEMPLATE_FILE" ]]; then
+  echo "📝 Adding context to template (template should exist now)..."
+  sleep 2
+  if docker compose exec litespeed test -f /usr/local/lsws/conf/templates/docker.conf; then
+    docker compose exec litespeed sh -c "sed -i '\$d' /usr/local/lsws/conf/templates/docker.conf && cat >> /usr/local/lsws/conf/templates/docker.conf << 'TEMPLATE_EOF'
+
+  context /phpmyadmin {
+    type                    php
+    location                \$DOC_ROOT/phpmyadmin/
+    indexFiles              index.php
+    
+    phpConfig {
+      pool                phpmyadmin-fpm
+    }
+    
+    accessControl {
+      allow                 *
+    }
+  }
+}
+TEMPLATE_EOF'"
+  fi
+fi
+
+# Restart LiteSpeed to pick up configuration changes
+echo "🔄 Restarting LiteSpeed..."
+docker compose exec litespeed /usr/local/lsws/bin/lswsctrl restart || true
+sleep 3
 
 # 6. Wait for services and test
 echo "⏳ Waiting for services..."
@@ -100,10 +174,10 @@ sleep 10
 
 if curl -s http://localhost/phpmyadmin > /dev/null; then
   echo "✅ SUCCESS! phpMyAdmin ready at http://localhost/phpmyadmin"
-  echo "📊 MySQL: $(docker-compose ps mysql | grep Up || echo 'Not running')"
-  echo "🌐 OLS:   $(docker-compose ps litespeed | grep Up || echo 'Not running')"
-  echo "🐳 phpMyAdmin FPM: $(docker-compose ps phpmyadmin | grep Up || echo 'Not running')"
+  echo "📊 MySQL: $(docker compose ps mysql | grep Up || echo 'Not running')"
+  echo "🌐 OLS:   $(docker compose ps litespeed | grep Up || echo 'Not running')"
+  echo "🐳 phpMyAdmin FPM: $(docker compose ps phpmyadmin | grep Up || echo 'Not running')"
 else
   echo "❌ phpMyAdmin not responding. Check logs:"
-  docker-compose logs phpmyadmin litespeed | tail -20
+  docker compose logs phpmyadmin litespeed | tail -20
 fi
