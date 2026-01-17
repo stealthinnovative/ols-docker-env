@@ -88,20 +88,6 @@ services:
       start_period: 25s
     networks:
       - default
-
-  redis:
-    image: ${REDIS_IMAGE:-redis:alpine}
-    logging:
-      driver: none
-    # command: redis-server --requirepass 8b405f60665e48f795752e534d93b722
-    volumes:
-      - ./redis/data:/data
-      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
-    environment:
-      - REDIS_REPLICATION_MODE=master
-    restart: always
-    networks:
-      - default
 networks:
   default:
     driver: bridge
