@@ -1,9 +1,11 @@
 services:
   mysql:
-    image: mariadb:11.4
+    image: ${MARIADB_IMAGE:-mariadb:lts-noble}
     logging:
       driver: none
-    command: ["--max-allowed-packet=512M"]
+    command:
+      - "--max-allowed-packet=512M"              # Original dev's proven value
+      - "--max-connections=${MARIADB_MAX_CONNS:-200}"  # 200 default, 400 for 8GB+
     volumes:
       - "./data/db:/var/lib/mysql:delegated"
     environment:
@@ -12,10 +14,36 @@ services:
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -u root -p$$MYSQL_ROOT_PASSWORD --connect-timeout=5 || exit 1"]
+      interval: 30s          # Resource-optimized for DB
+      timeout: 8s
+      retries: 3             # 90s failure window
+      start_period: 60s
     networks:
       - default
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:alpine}
+    logging:
+      driver: none
+    volumes:
+      - ./redis/data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+    environment:
+      - REDIS_REPLICATION_MODE=master
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping && redis-cli info memory | awk '/used_memory_human:/{u=substr($2,1,length($2)-1)} /maxmemory_human:/{m=substr($2,1,length($2)-1)} END{if(m && u>m*0.9) exit 1}'"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - default
+
   litespeed:
-    image: litespeedtech/openlitespeed:${OLS_VERSION}-${PHP_VERSION}
+    image: litespeedtech/openlitespeed:${LITESPEED_IMAGE:-1.8.5-lsphp85}
     container_name: litespeed
     env_file:
       - .env
@@ -33,11 +61,18 @@ services:
       - 7080:7080
     restart: always
     environment:
-      TZ: ${TimeZone}
+      TZ: ${TIMEZONE}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ -m 3 || curl -f http://localhost:7080/ -m 3 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
     networks:
       - default
+
   phpmyadmin:
-    image: phpmyadmin/phpmyadmin:${PHPMYADMIN_VERSION}
+    image: phpmyadmin:${PHPMYADMIN_IMAGE:-latest}
     env_file:
       - .env
     ports:
@@ -45,21 +80,15 @@ services:
     environment:
       PMA_HOST: mysql
     restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 80 || exit 1"]
+      interval: 20s
+      timeout: 2s
+      retries: 3
+      start_period: 25s
     networks:
       - default
-  redis:
-    image: "redis:alpine"
-    logging:
-      driver: none
-    # command: redis-server --requirepass 8b405f60665e48f795752e534d93b722
-    volumes:
-      - ./redis/data:/data
-      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
-    environment:
-      - REDIS_REPLICATION_MODE=master
-    restart: always
-    networks:
-      - default
+
 networks:
   default:
     driver: bridge
