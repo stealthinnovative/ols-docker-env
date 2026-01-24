@@ -1,10 +1,29 @@
 services:
-  # --- 1. Database (MariaDB 11.x LTS) ---
+  # --- 1. Hardware & Memory Optimizer (Optional if script is run) ---
+  host-optimizer:
+    image: alpine:latest
+    container_name: host-optimizer
+    privileged: true
+    environment:
+      - HOST_SWAP_SIZE=${HOST_SWAP_SIZE:-2G}
+      - ZSWAP_MAX_PERCENT=${ZSWAP_MAX_PERCENT:-38}
+    restart: "no"
+    command: >
+      sh -c "
+      echo ${ZSWAP_MAX_PERCENT} > /sys/module/zswap/parameters/max_pool_percent &&
+      echo 1 > /sys/module/zswap/parameters/enabled &&
+      if [ ! -f /swapfile ]; then
+        fallocate -l ${HOST_SWAP_SIZE} /swapfile &&
+        chmod 600 /swapfile &&
+        mkswap /swapfile &&
+        swapon /swapfile;
+      fi
+      "
+
+  # --- 2. Database (MariaDB 11.x LTS) ---
   mysql:
     image: ${MARIADB_IMAGE:-mariadb:lts-noble}
     container_name: mariadb
-    # We use high swappiness only if we want to force things into Zswap early.
-    # On Ryzen, we prefer DB stays in real RAM (L3 cache affinity).
     sysctls:
       - vm.swappiness=${DB_SWAPPINESS:-1}
     command:
@@ -30,19 +49,22 @@ services:
     networks:
       - wp_network
 
-  # --- 2. Web Server (OpenLiteSpeed) ---
+  # --- 3. Web Server (OpenLiteSpeed) ---
   litespeed:
     image: ${LITESPEED_IMAGE:-litespeedtech/openlitespeed:1.8.5-lsphp85}
     container_name: litespeed
-    # mem_limit and memswap_limit work together. 
-    # This allows OLS to use 2G of RAM and 'burst' into your Zswap pool up to 3.5G.
     mem_limit: ${OLS_MEM_LIMIT:-2g}
     memswap_limit: ${OLS_TOTAL_LIMIT:-3.5g}
     sysctls:
       - vm.swappiness=${OLS_SWAPPINESS:-10}
     environment:
+      TZ: ${TIMEZONE:-Pacific/Honolulu}
       LSAPI_CHILDREN: ${PHP_WORKERS:-24}
       PHP_LSAPI_CHILDREN: ${PHP_WORKERS:-24}
+      LSAPI_AVOID_FORK: ${PHP_FORK_THRESHOLD:-100M}
+      LSAPI_MAX_IDLE_CHILDREN: ${PHP_MAX_IDLE:-4}
+      OLS_WORKERS: ${OLS_WORKERS:-1}
+      CPU_AFFINITY: ${CPU_AFFINITY:-1}
     volumes:
       - ./lsws/conf:/usr/local/lsws/conf
       - ./sites:/var/www/vhosts/
@@ -56,13 +78,13 @@ services:
     networks:
       - wp_network
 
-  # --- 3. Cache (Redis Socket) ---
+  # --- 4. Cache (Redis Socket) ---
   redis:
     image: ${REDIS_IMAGE:-redis:alpine}
     container_name: redis
     command: redis-server ${REDIS_COMMAND}
     sysctls:
-      - vm.swappiness=${REDIS_SWAPPINESS:-0} # Redis should NEVER swap.
+      - vm.swappiness=${REDIS_SWAPPINESS:-0}
     deploy:
       resources:
         limits:
