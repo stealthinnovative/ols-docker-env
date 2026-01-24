@@ -1,93 +1,81 @@
 services:
+  # --- 1. Database (MariaDB 11.x LTS) ---
   mysql:
     image: ${MARIADB_IMAGE:-mariadb:lts-noble}
-    logging:
-      driver: none
+    container_name: mariadb
+    # We use high swappiness only if we want to force things into Zswap early.
+    # On Ryzen, we prefer DB stays in real RAM (L3 cache affinity).
+    sysctls:
+      - vm.swappiness=${DB_SWAPPINESS:-1}
     command:
-      - "--max-allowed-packet=512M"              # Original dev's proven value
-      - "--max-connections=${MARIADB_MAX_CONNS:-200}"  # 200 default, 400 for 8GB+
+      - "mariadbd"
+      - "--max-allowed-packet=512M"
+      - "--max-connections=${MARIADB_MAX_CONNS:-151}"
+      - "--innodb-buffer-pool-size=${DB_BUFFER_POOL:-512M}"
+      - "--innodb-log-file-size=${DB_LOG_FILE:-128M}"
+      - "--innodb-flush-log-at-trx-commit=${DB_FLUSH_COMMIT:-2}"
+      - "--performance-schema=0"
+    deploy:
+      resources:
+        limits:
+          memory: ${DB_MEM_LIMIT:-1.2g}
     volumes:
-      - "./data/db:/var/lib/mysql:delegated"
+      - ./data/db:/var/lib/mysql
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-    restart: always
-    healthcheck:
-      test: ["CMD-SHELL", "mariadb-admin ping -u root -p$$MYSQL_ROOT_PASSWORD --connect-timeout=5 || exit 1"]
-      interval: 30s          # Resource-optimized for DB
-      timeout: 8s
-      retries: 3             # 90s failure window
-      start_period: 60s
+    restart: unless-stopped
     networks:
-      - default
+      - wp_network
 
-  redis:
-    image: ${REDIS_IMAGE:-redis:alpine}
-    logging:
-      driver: none
-    volumes:
-      - ./redis/data:/data
-      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
-    environment:
-      - REDIS_REPLICATION_MODE=master
-    restart: always
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping && redis-cli info memory | awk '/used_memory_human:/{u=substr($2,1,length($2)-1)} /maxmemory_human:/{m=substr($2,1,length($2)-1)} END{if(m && u>m*0.9) exit 1}'"]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    networks:
-      - default
-
+  # --- 2. Web Server (OpenLiteSpeed) ---
   litespeed:
-    image: litespeedtech/openlitespeed:${LITESPEED_IMAGE:-1.8.5-lsphp85}
+    image: ${LITESPEED_IMAGE:-litespeedtech/openlitespeed:1.8.5-lsphp85}
     container_name: litespeed
-    env_file:
-      - .env
+    # mem_limit and memswap_limit work together. 
+    # This allows OLS to use 2G of RAM and 'burst' into your Zswap pool up to 3.5G.
+    mem_limit: ${OLS_MEM_LIMIT:-2g}
+    memswap_limit: ${OLS_TOTAL_LIMIT:-3.5g}
+    sysctls:
+      - vm.swappiness=${OLS_SWAPPINESS:-10}
+    environment:
+      LSAPI_CHILDREN: ${PHP_WORKERS:-24}
+      PHP_LSAPI_CHILDREN: ${PHP_WORKERS:-24}
     volumes:
       - ./lsws/conf:/usr/local/lsws/conf
-      - ./lsws/admin-conf:/usr/local/lsws/admin/conf
-      - ./bin/container:/usr/local/bin
       - ./sites:/var/www/vhosts/
-      - ./acme:/root/.acme.sh/
       - ./logs:/usr/local/lsws/logs/
+      - redis_socket:/var/run/redis
     ports:
-      - 80:80
-      - 443:443
-      - 443:443/udp
-      - 7080:7080
-    restart: always
-    environment:
-      TZ: ${TIMEZONE}
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/ -m 3 || curl -f http://localhost:7080/ -m 3 || exit 1"]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 45s
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    restart: unless-stopped
     networks:
-      - default
+      - wp_network
 
-  phpmyadmin:
-    image: phpmyadmin:${PHPMYADMIN_IMAGE:-latest}
-    env_file:
-      - .env
-    ports:
-      - 8080:80
-    environment:
-      PMA_HOST: mysql
-    restart: always
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 80 || exit 1"]
-      interval: 20s
-      timeout: 2s
-      retries: 3
-      start_period: 25s
+  # --- 3. Cache (Redis Socket) ---
+  redis:
+    image: ${REDIS_IMAGE:-redis:alpine}
+    container_name: redis
+    command: redis-server ${REDIS_COMMAND}
+    sysctls:
+      - vm.swappiness=${REDIS_SWAPPINESS:-0} # Redis should NEVER swap.
+    deploy:
+      resources:
+        limits:
+          memory: ${REDIS_MEM_LIMIT:-300M}
+    volumes:
+      - redis_socket:/var/run/redis
+    restart: unless-stopped
     networks:
-      - default
+      - wp_network
+
+volumes:
+  redis_socket:
+
 networks:
-  default:
+  wp_network:
     driver: bridge
