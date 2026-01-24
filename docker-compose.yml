@@ -1,93 +1,103 @@
 services:
+  # --- 1. Hardware & Memory Optimizer (The Bridge) ---
+  host-optimizer:
+    image: alpine:latest
+    container_name: host-optimizer
+    privileged: true
+    environment:
+      - HOST_SWAP_SIZE=${HOST_SWAP_SIZE:-2G}
+      - ZSWAP_MAX_PERCENT=${ZSWAP_MAX_PERCENT:-25}
+    restart: "no"
+    command: >
+      sh -c "
+      echo '--- Configuring Ryzen Zswap ---' &&
+      echo ${ZSWAP_MAX_PERCENT} > /sys/module/zswap/parameters/max_pool_percent &&
+      echo 1 > /sys/module/zswap/parameters/enabled &&
+      
+      echo '--- Managing ${HOST_SWAP_SIZE} Swapfile ---' &&
+      if [ ! -f /swapfile ]; then
+        fallocate -l ${HOST_SWAP_SIZE} /swapfile &&
+        chmod 600 /swapfile &&
+        mkswap /swapfile &&
+        swapon /swapfile &&
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab;
+      fi &&
+      echo '--- [SUCCESS] Host Optimized ---'
+      "
+
   mysql:
     image: ${MARIADB_IMAGE:-mariadb:lts-noble}
-    logging:
-      driver: none
+    container_name: mariadb
+    depends_on:
+      host-optimizer:
+        condition: service_completed_successfully
     command:
-      - "--max-allowed-packet=512M"              # Original dev's proven value
-      - "--max-connections=${MARIADB_MAX_CONNS:-200}"  # 200 default, 400 for 8GB+
+      - "mariadbd"
+      - "--max-allowed-packet=${PHP_POST_MAX_SIZE:-512M}"
+      - "--max-connections=${MARIADB_MAX_CONNS:-151}"
+      - "--innodb-buffer-pool-size=${DB_BUFFER_POOL:-256M}"
+      - "--innodb-flush-method=O_DIRECT"
+      - "--performance-schema=0"
+    deploy:
+      resources:
+        limits:
+          memory: ${DB_MEM_LIMIT:-1g}
     volumes:
-      - "./data/db:/var/lib/mysql:delegated"
+      - ./data/db:/var/lib/mysql
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-    restart: always
-    healthcheck:
-      test: ["CMD-SHELL", "mariadb-admin ping -u root -p$$MYSQL_ROOT_PASSWORD --connect-timeout=5 || exit 1"]
-      interval: 30s          # Resource-optimized for DB
-      timeout: 8s
-      retries: 3             # 90s failure window
-      start_period: 60s
+    restart: unless-stopped
     networks:
-      - default
-
-  redis:
-    image: ${REDIS_IMAGE:-redis:alpine}
-    logging:
-      driver: none
-    volumes:
-      - ./redis/data:/data
-      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
-    environment:
-      - REDIS_REPLICATION_MODE=master
-    restart: always
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping && redis-cli info memory | awk '/used_memory_human:/{u=substr($2,1,length($2)-1)} /maxmemory_human:/{m=substr($2,1,length($2)-1)} END{if(m && u>m*0.9) exit 1}'"]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    networks:
-      - default
+      - wp_network
 
   litespeed:
     image: litespeedtech/openlitespeed:${LITESPEED_IMAGE:-1.8.5-lsphp85}
     container_name: litespeed
-    env_file:
-      - .env
+    depends_on:
+      host-optimizer:
+        condition: service_completed_successfully
+    mem_limit: ${OLS_MEM_LIMIT:-2g}
+    memswap_limit: ${OLS_TOTAL_LIMIT:-5g}
+    environment:
+      TZ: ${TIMEZONE:-UTC}
+      LSAPI_CHILDREN: ${PHP_WORKERS:-24}
+      PHP_LSAPI_CHILDREN: ${PHP_WORKERS:-24}
+      LSAPI_AVOID_FORK: ${PHP_FORK_THRESHOLD:-100M}
+      LSAPI_MAX_IDLE_CHILDREN: ${PHP_MAX_IDLE:-4}
+      OLS_WORKERS: 1
+      CPU_AFFINITY: 1
     volumes:
       - ./lsws/conf:/usr/local/lsws/conf
-      - ./lsws/admin-conf:/usr/local/lsws/admin/conf
-      - ./bin/container:/usr/local/bin
       - ./sites:/var/www/vhosts/
-      - ./acme:/root/.acme.sh/
       - ./logs:/usr/local/lsws/logs/
     ports:
-      - 80:80
-      - 443:443
-      - 443:443/udp
-      - 7080:7080
-    restart: always
-    environment:
-      TZ: ${TIMEZONE}
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/ -m 3 || curl -f http://localhost:7080/ -m 3 || exit 1"]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 45s
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    restart: unless-stopped
     networks:
-      - default
+      - wp_network
 
-  phpmyadmin:
-    image: phpmyadmin:${PHPMYADMIN_IMAGE:-latest}
-    env_file:
-      - .env
-    ports:
-      - 8080:80
-    environment:
-      PMA_HOST: mysql
-    restart: always
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 80 || exit 1"]
-      interval: 20s
-      timeout: 2s
-      retries: 3
-      start_period: 25s
+  redis:
+    image: ${REDIS_IMAGE:-redis:alpine}
+    container_name: redis
+    depends_on:
+      host-optimizer:
+        condition: service_completed_successfully
+    # Prevent Redis from being swapped out to keep performance high
+    sysctls:
+      - vm.swappiness=0
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+    restart: unless-stopped
     networks:
-      - default
+      - wp_network
+
 networks:
-  default:
+  wp_network:
     driver: bridge
