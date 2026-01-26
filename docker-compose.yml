@@ -1,4 +1,4 @@
-services:
+services: # Added missing top-level key
   # --- 1. Database (MariaDB 11.x LTS) ---
   mysql:
     image: ${MARIADB_IMAGE:-mariadb:lts-noble}
@@ -6,18 +6,23 @@ services:
     restart: always
     stop_grace_period: 1m
     cpuset: "0,1"
+    sysctls:
+      - net.core.somaxconn=65535
     command:
       - "mariadbd"
-      - "--max-allowed-packet=512M"
+      - "--max-allowed-packet=${DB_MAX_PACKET:-512M}"
       - "--max-connections=${MARIADB_MAX_CONNS:-151}"
       - "--innodb-buffer-pool-size=${DB_BUFFER_POOL:-512M}"
-      - "--innodb-log-file-size=${DB_LOG_FILE:-128M}"
+      - "--innodb-log-file-size=${DB_LOG_FILE:-256M}"
       - "--innodb-flush-log-at-trx-commit=${DB_FLUSH_COMMIT:-2}"
+      - "--innodb-read-io-threads=${DB_IO_THREADS:-4}"
+      - "--innodb-write-io-threads=${DB_IO_THREADS:-4}"
+      - "--innodb-io-capacity=${DB_IO_CAPACITY:-1000}"
       - "--performance-schema=0"
     deploy:
       resources:
         limits:
-          memory: ${DB_MEM_LIMIT:-1.2G}
+          memory: ${DB_MEM_LIMIT:-768M}
     volumes:
       - ./data/db:/var/lib/mysql:delegated
     environment:
@@ -28,7 +33,7 @@ services:
     networks:
       - wp_network
 
-  # --- 2. Web Server (OpenLiteSpeed) ---
+ # --- 2. Web Server (OpenLiteSpeed) ---
   litespeed:
     image: ${LITESPEED_IMAGE:-litespeedtech/openlitespeed:1.8.5-lsphp85}
     container_name: litespeed
@@ -36,18 +41,29 @@ services:
     stop_grace_period: 30s
     shm_size: '256mb'
     cpuset: "0,1"
+    sysctls:
+      - net.core.somaxconn=65535
+      - net.ipv4.tcp_fastopen=3
     deploy:
       resources:
+        reservations:
+          memory: ${OLS_MEM_RESERVE:-2G} 
         limits:
-          memory: ${OLS_MEM_LIMIT:-3.8G}
+          memory: ${OLS_MEM_LIMIT:-3500M} # Set slightly below 4G for host safety
     environment:
       TZ: ${TIMEZONE:-Pacific/Honolulu}
-      LSAPI_CHILDREN: ${PHP_WORKERS:-24}
       PHP_LSAPI_CHILDREN: ${PHP_WORKERS:-24}
       LSAPI_AVOID_FORK: ${PHP_FORK_THRESHOLD:-100M}
-      LSAPI_MAX_IDLE_CHILDREN: ${PHP_MAX_IDLE:-2}
+      LSAPI_MAX_IDLE_CHILDREN: ${PHP_MAX_IDLE:-16} 
+      LSAPI_MAX_REQS: ${LSAPI_MAX_REQS:-500}
+      PHP_LSAPI_MAX_REQS: ${LSAPI_MAX_REQS:-500}
       OLS_WORKERS: ${OLS_WORKERS:-1}
       CPU_AFFINITY: ${CPU_AFFINITY:-1}
+      # PHP specific overrides
+      PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-256M}
+      PHP_MAX_EXECUTION_TIME: ${PHP_MAX_EXECUTION_TIME:-30}
+      PHP_UPLOAD_MAX_FILESIZE: ${PHP_UPLOAD_MAX_FILESIZE:-512M}
+      PHP_POST_MAX_SIZE: ${PHP_POST_MAX_SIZE:-512M}
     volumes:
       - ./lsws/conf:/usr/local/lsws/conf
       - ./lsws/admin-conf:/usr/local/lsws/admin/conf
@@ -55,7 +71,7 @@ services:
       - ./sites:/var/www/vhosts/
       - ./acme:/root/.acme.sh/
       - ./logs:/usr/local/lsws/logs/
-      - redis_socket:/var/run/redis
+      - ./redis/run:/var/run/redis
     ports:
       - "80:80"
       - "443:443"
@@ -64,7 +80,7 @@ services:
     networks:
       - wp_network
 
-  # --- 3. Database Management (phpMyAdmin) ---
+  # --- 3. Database Management ---
   phpmyadmin:
     image: phpmyadmin:latest
     container_name: phpmyadminnao
@@ -82,25 +98,45 @@ services:
     networks:
       - wp_network
 
-  # --- 4. Cache (Redis Socket) ---
+  # --- 4. Cache (WooCommerce Surge Optimized) ---
   redis:
     image: ${REDIS_IMAGE:-redis:alpine}
     container_name: redis
     restart: always
     cpuset: "0"
-    command: redis-server ${REDIS_COMMAND}
+    sysctls: # Fixed: Unified sysctls block
+      - net.core.somaxconn=65535
+    entrypoint: >
+      sh -c "
+      rm -f /var/run/redis/redis.sock && 
+      exec redis-server 
+      --port 6379 
+      --unixsocket /var/run/redis/redis.sock 
+      --unixsocketperm 777 
+      --tcp-backlog 65535 
+      --databases 64 
+      --maxmemory ${REDIS_MAX_MEMORY:-128mb} 
+      --maxmemory-policy allkeys-lru 
+      --save '' 
+      --appendonly no 
+      --timeout 0
+      --maxclients 20000
+      --hz 100
+      --activedefrag yes
+      --lazyfree-lazy-eviction yes
+      --lazyfree-lazy-expire yes
+      --lazyfree-lazy-server-del yes
+      "
     deploy:
       resources:
         limits:
-          memory: ${REDIS_MEM_LIMIT:-128M}
+          memory: ${REDIS_MEM_LIMIT:-256M}
     volumes:
       - ./redis/data:/data
-      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
-    environment:
-      - REDIS_REPLICATION_MODE=master
-    restart: always
+      - ./redis/run:/var/run/redis
     networks:
-      - default
+      - wp_network
+
 networks:
-  default:
+  wp_network:
     driver: bridge
