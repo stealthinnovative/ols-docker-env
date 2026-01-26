@@ -1,31 +1,11 @@
 services:
-  # --- 1. Hardware & Memory Optimizer (Optional if script is run) ---
-  host-optimizer:
-    image: alpine:latest
-    container_name: host-optimizer
-    privileged: true
-    environment:
-      - HOST_SWAP_SIZE=${HOST_SWAP_SIZE:-2G}
-      - ZSWAP_MAX_PERCENT=${ZSWAP_MAX_PERCENT:-38}
-    restart: "no"
-    command: >
-      sh -c "
-      echo ${ZSWAP_MAX_PERCENT} > /sys/module/zswap/parameters/max_pool_percent &&
-      echo 1 > /sys/module/zswap/parameters/enabled &&
-      if [ ! -f /swapfile ]; then
-        fallocate -l ${HOST_SWAP_SIZE} /swapfile &&
-        chmod 600 /swapfile &&
-        mkswap /swapfile &&
-        swapon /swapfile;
-      fi
-      "
-
-  # --- 2. Database (MariaDB 11.x LTS) ---
+  # --- 1. Database (MariaDB 11.x LTS) ---
   mysql:
     image: ${MARIADB_IMAGE:-mariadb:lts-noble}
     container_name: mariadb
-    sysctls:
-      - vm.swappiness=${DB_SWAPPINESS:-1}
+    restart: always
+    stop_grace_period: 1m
+    cpuset: "0,1"
     command:
       - "mariadbd"
       - "--max-allowed-packet=512M"
@@ -37,44 +17,68 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${DB_MEM_LIMIT:-1.2g}
+          memory: ${DB_MEM_LIMIT:-1.2G}
     volumes:
-      - ./data/db:/var/lib/mysql
+      - ./data/db:/var/lib/mysql:delegated
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-    restart: unless-stopped
     networks:
       - wp_network
 
-  # --- 3. Web Server (OpenLiteSpeed) ---
+  # --- 2. Web Server (OpenLiteSpeed) ---
   litespeed:
     image: ${LITESPEED_IMAGE:-litespeedtech/openlitespeed:1.8.5-lsphp85}
     container_name: litespeed
-    mem_limit: ${OLS_MEM_LIMIT:-2g}
-    memswap_limit: ${OLS_TOTAL_LIMIT:-3.5g}
-    sysctls:
-      - vm.swappiness=${OLS_SWAPPINESS:-10}
+    restart: always
+    stop_grace_period: 30s
+    shm_size: '256mb'
+    cpuset: "0,1"
+    deploy:
+      resources:
+        limits:
+          memory: ${OLS_MEM_LIMIT:-3.8G}
     environment:
       TZ: ${TIMEZONE:-Pacific/Honolulu}
       LSAPI_CHILDREN: ${PHP_WORKERS:-24}
       PHP_LSAPI_CHILDREN: ${PHP_WORKERS:-24}
       LSAPI_AVOID_FORK: ${PHP_FORK_THRESHOLD:-100M}
-      LSAPI_MAX_IDLE_CHILDREN: ${PHP_MAX_IDLE:-4}
+      LSAPI_MAX_IDLE_CHILDREN: ${PHP_MAX_IDLE:-2}
       OLS_WORKERS: ${OLS_WORKERS:-1}
       CPU_AFFINITY: ${CPU_AFFINITY:-1}
     volumes:
       - ./lsws/conf:/usr/local/lsws/conf
+      - ./lsws/admin-conf:/usr/local/lsws/admin/conf
+      - ./bin/container:/usr/local/bin
       - ./sites:/var/www/vhosts/
+      - ./acme:/root/.acme.sh/
       - ./logs:/usr/local/lsws/logs/
       - redis_socket:/var/run/redis
     ports:
       - "80:80"
       - "443:443"
       - "443:443/udp"
-    restart: unless-stopped
+      - "7080:7080" 
+    networks:
+      - wp_network
+
+  # --- 3. Database Management (phpMyAdmin) ---
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: phpmyadminnao
+    restart: "no"
+    cpuset: "0,1"
+    profiles:
+      - manual
+    environment:
+      PMA_HOST: mysql
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      UPLOAD_LIMIT: 512M
+      MAX_EXECUTION_TIME: 600
+    ports:
+      - "${PMA_PORT:-8080}:80"
     networks:
       - wp_network
 
@@ -82,22 +86,21 @@ services:
   redis:
     image: ${REDIS_IMAGE:-redis:alpine}
     container_name: redis
+    restart: always
+    cpuset: "0"
     command: redis-server ${REDIS_COMMAND}
-    sysctls:
-      - vm.swappiness=${REDIS_SWAPPINESS:-0}
     deploy:
       resources:
         limits:
-          memory: ${REDIS_MEM_LIMIT:-300M}
+          memory: ${REDIS_MEM_LIMIT:-128M}
     volumes:
-      - redis_socket:/var/run/redis
-    restart: unless-stopped
+      - ./redis/data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+    environment:
+      - REDIS_REPLICATION_MODE=master
+    restart: always
     networks:
-      - wp_network
-
-volumes:
-  redis_socket:
-
+      - default
 networks:
-  wp_network:
+  default:
     driver: bridge

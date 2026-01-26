@@ -1,77 +1,93 @@
 #!/usr/bin/env bash
 
-# 1. Source the .env file from the current working directory
-if [ -f .env ]; then
-    source .env
+# --- 1. Path Resolution ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_PATH="$(dirname "$SCRIPT_DIR")/.env"
+
+# --- 2. Environment Loader ---
+if [ -f "$ENV_PATH" ]; then
+    set -a
+    source "$ENV_PATH"
+    set +a
 else
-    echo -e "\033[31m[ERROR]\033[0m .env file not found. Please run this from the project root (ols-docker-env/)."
+    echo -e "\033[31m[ERROR]\033[0m .env file not found at: $ENV_PATH"
     exit 1
 fi
 
-# Formatting function
+# --- 3. Formatting Function ---
 echow(){
     echo -e "\033[1m[HOST-OPT]\033[0m ${1}"
 }
 
-apply_zswap() {
-    # Check if Zswap variables exist in your .env
-    if [ -n "${ZSWAP_MAX_PERCENT}" ]; then
-        echow "Configuring Zswap with Ryzen 7900X compression..."
-        
-        # Set the max pool size (percentage of your 4GB RAM)
-        echo "${ZSWAP_MAX_PERCENT}" > /sys/module/zswap/parameters/max_pool_percent
-        
-        # Ensure the Zswap module is enabled
-        echo 1 > /sys/module/zswap/parameters/enabled
-        
-        # Use z3fold for better compression ratio if available (standard in modern kernels)
-        if [ -d "/sys/module/z3fold" ]; then
-            echo z3fold > /sys/module/zswap/parameters/zpool 2>/dev/null
-        fi
-        
-        echow "Zswap pool set to ${ZSWAP_MAX_PERCENT}%."
-    else
-        echow "ZSWAP_MAX_PERCENT not found in .env. Skipping Zswap config."
+# --- 4. Kernel & Zswap Optimization ---
+apply_kernel_optimizations() {
+    echow "Configuring Kernel for Ryzen 7900X + Redis + Zswap..."
+    
+    # Enable Zswap & Compression
+    echo 1 > /sys/module/zswap/parameters/enabled
+    echo "${ZSWAP_MAX_PERCENT:-38}" > /sys/module/zswap/parameters/max_pool_percent
+    echo zstd > /sys/module/zswap/parameters/compressor 2>/dev/null
+    
+    if [ -d "/sys/module/z3fold" ]; then
+        echo z3fold > /sys/module/zswap/parameters/zpool 2>/dev/null
     fi
+
+    # --- Redis & DB Specific Kernel Fixes ---
+    # Fixes: "Memory overcommit must be enabled"
+    sysctl -w vm.overcommit_memory=1
+    
+    # Fixes: "TCP backlog setting... cannot be enforced"
+    sysctl -w net.core.somaxconn=1024
+    
+    # Optimization: High-performance memory mapping for MariaDB/Redis
+    sysctl -w vm.max_map_count=262144
+
+    # Performance: Low swappiness for Zswap + NVMe
+    sysctl -w vm.swappiness=10
+
+    echow "Kernel parameters applied successfully."
 }
 
+# --- 5. NVMe Swapfile Logic ---
 apply_swapfile() {
     if [ -n "${HOST_SWAP_SIZE}" ]; then
         if [ ! -f /swapfile ]; then
             echow "Creating ${HOST_SWAP_SIZE} swapfile on NVMe..."
-            
-            # Using fallocate for instant allocation on NVMe
             fallocate -l "${HOST_SWAP_SIZE}" /swapfile
             chmod 600 /swapfile
             mkswap /swapfile
             swapon /swapfile
             
-            # Ensure it persists after a reboot
             if ! grep -q "/swapfile" /etc/fstab; then
                 echo '/swapfile none swap sw 0 0' >> /etc/fstab
-                echow "Swapfile added to /etc/fstab for persistence."
             fi
         else
-            echow "Swapfile check: Already active."
-            # Ensure it is actually on (in case it was turned off manually)
+            echow "Swapfile active. Ensuring swapon."
             swapon /swapfile 2>/dev/null
         fi
-    else
-        echow "HOST_SWAP_SIZE not found in .env. Skipping swapfile creation."
     fi
 }
 
+# --- 6. Main Execution ---
 main() {
-    # Ensure script is run as root (required to touch /sys/ and /etc/fstab)
     if [[ $EUID -ne 0 ]]; then
-       echo -e "\033[31m[ERROR]\033[0m This script must be run as root. Use: sudo ./bin/zswap-enable"
+       echo -e "\033[31m[ERROR]\033[0m Must be run with sudo."
        exit 1
     fi
 
-    echow "Starting Host Optimization..."
-    apply_zswap
+    echow "--- Starting Host Optimization ---"
+    apply_kernel_optimizations
     apply_swapfile
-    echow "SUCCESS: Your Ryzen host is now optimized for the LiteSpeed stack."
+    
+    echo "------------------------------------------------"
+    echow "VERIFYING SETTINGS:"
+    echo -n "Zswap Active:      " && cat /sys/module/zswap/parameters/enabled
+    echo -n "Overcommit Mem:    " && sysctl -n vm.overcommit_memory
+    echo -n "TCP Backlog (Max): " && sysctl -n net.core.somaxconn
+    echo -n "Global Swappiness: " && sysctl -n vm.swappiness
+    echo -n "Compressor:        " && cat /sys/module/zswap/parameters/compressor
+    echo "------------------------------------------------"
+    echow "SUCCESS: Ryzen 7900X is tuned. Now run 'docker compose up -d'"
 }
 
 main
