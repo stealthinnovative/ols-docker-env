@@ -5,7 +5,10 @@ services:
     container_name: mariadb
     restart: always
     stop_grace_period: 1m
-    cpuset: "1" # Pinned to Core 1 to separate from Redis Core 0
+    # Enables io_uring for Ryzen performance and prevents "Bad magic header" crashes
+    security_opt:
+      - seccomp:unconfined
+    cpuset: "1" 
     sysctls:
       - net.core.somaxconn=65535
     command:
@@ -15,11 +18,11 @@ services:
       - "--innodb-buffer-pool-size=${DB_BUFFER_POOL:-512M}"
       - "--innodb-log-file-size=${DB_LOG_FILE:-256M}"
       - "--innodb-flush-log-at-trx-commit=${DB_FLUSH_COMMIT:-2}"
-      - "--innodb-read-io-threads=8" # Increased for NVMe throughput
-      - "--innodb-write-io-threads=8" # Increased for NVMe throughput
-      - "--innodb-io-capacity=20000" # Optimized for your 152k IOPS benchmark
+      - "--innodb-read-io-threads=8"
+      - "--innodb-write-io-threads=8"
+      - "--innodb-io-capacity=20000"
       - "--innodb-io-capacity-max=40000"
-      - "--innodb-flush-neighbors=0" # Optimized for SSD/NVMe
+      - "--innodb-flush-neighbors=0"
       - "--performance-schema=0"
     deploy:
       resources:
@@ -35,13 +38,13 @@ services:
     networks:
       - wp_network
 
- # --- 2. Web Server (OpenLiteSpeed) ---
+  # --- 2. Web Server (OpenLiteSpeed) ---
   litespeed:
     image: ${LITESPEED_IMAGE:-litespeedtech/openlitespeed:1.8.5-lsphp85}
     container_name: litespeed
     restart: always
     stop_grace_period: 30s
-    shm_size: '256mb'
+    shm_size: '512mb'
     cpuset: "0,1"
     sysctls:
       - net.core.somaxconn=65535
@@ -51,7 +54,7 @@ services:
         reservations:
           memory: ${OLS_MEM_RESERVE:-2G} 
         limits:
-          memory: ${OLS_MEM_LIMIT:-3500M} # Set slightly below 4G for host safety
+          memory: ${OLS_MEM_LIMIT:-3500M}
     environment:
       TZ: ${TIMEZONE:-Pacific/Honolulu}
       PHP_LSAPI_CHILDREN: ${PHP_WORKERS:-24}
@@ -61,13 +64,13 @@ services:
       PHP_LSAPI_MAX_REQS: ${LSAPI_MAX_REQS:-500}
       OLS_WORKERS: ${OLS_WORKERS:-1}
       CPU_AFFINITY: ${CPU_AFFINITY:-1}
-      # PHP specific overrides
-      PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-256M}
+      PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-512M}
       PHP_MAX_EXECUTION_TIME: ${PHP_MAX_EXECUTION_TIME:-30}
       PHP_UPLOAD_MAX_FILESIZE: ${PHP_UPLOAD_MAX_FILESIZE:-512M}
       PHP_POST_MAX_SIZE: ${PHP_POST_MAX_SIZE:-512M}
+      PHP_OPTIONS: "-d opcache.enable=1 -d opcache.jit_buffer_size=128M -d opcache.jit=1235"
     volumes:
-      - ./lsws/conf:/usr/local/lsws/conf
+      - ./lsws/php/php.ini:/usr/local/lsws/${LSPHP_NAME:-lsphp85}/etc/php/${PHP_VERSION:-8.5}/litespeed/php.ini
       - ./lsws/admin-conf:/usr/local/lsws/admin/conf
       - ./bin/container:/usr/local/bin
       - ./sites:/var/www/vhosts/
@@ -100,7 +103,7 @@ services:
     networks:
       - wp_network
 
-  # --- 4. Cache (WooCommerce Surge Optimized) ---
+  # --- 4. Cache (Redis Optimized) ---
   redis:
     image: ${REDIS_IMAGE:-redis:alpine}
     container_name: redis
