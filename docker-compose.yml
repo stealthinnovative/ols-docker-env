@@ -32,9 +32,6 @@ services:
       - ./data/db:/var/lib/mysql:delegated
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     networks:
       - wp_network
 
@@ -57,18 +54,7 @@ services:
           memory: ${OLS_MEM_LIMIT:-3500M}
     environment:
       TZ: ${TIMEZONE:-Pacific/Honolulu}
-      PHP_LSAPI_CHILDREN: ${PHP_WORKERS:-24}
-      LSAPI_AVOID_FORK: ${PHP_FORK_THRESHOLD:-100M}
-      LSAPI_MAX_IDLE_CHILDREN: ${PHP_MAX_IDLE:-16} 
-      LSAPI_MAX_REQS: ${LSAPI_MAX_REQS:-500}
-      PHP_LSAPI_MAX_REQS: ${LSAPI_MAX_REQS:-500}
-      OLS_WORKERS: ${OLS_WORKERS:-1}
-      CPU_AFFINITY: ${CPU_AFFINITY:-1}
-      PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-512M}
-      PHP_MAX_EXECUTION_TIME: ${PHP_MAX_EXECUTION_TIME:-30}
-      PHP_UPLOAD_MAX_FILESIZE: ${PHP_UPLOAD_MAX_FILESIZE:-512M}
-      PHP_POST_MAX_SIZE: ${PHP_POST_MAX_SIZE:-512M}
-      PHP_OPTIONS: "-d opcache.enable=1 -d opcache.jit_buffer_size=128M -d opcache.jit=1235"
+ 
     volumes:
       - ./lsws/php/php.ini:/usr/local/lsws/${LSPHP_NAME:-lsphp85}/etc/php/${PHP_VERSION:-8.5}/litespeed/php.ini
       - ./lsws/admin-conf:/usr/local/lsws/admin/conf
