@@ -322,3 +322,24 @@ If you still have a question after using OpenLiteSpeed Docker, you have a few op
 * Reporting any issue on [Github ols-docker-env](https://github.com/litespeedtech/ols-docker-env/issues) project
 
 **_Pull requests are always welcome!_**
+
+
+🚦 What to do right now
+Save the .env in your root folder.
+
+Run the Host Optimizer:
+
+Bash
+sudo ./bin/zswap-enable
+Launch the Stack:
+
+Bash
+docker compose up -d
+Verify Redis Socket:
+
+Bash
+docker exec -it redis ls -lh /var/run/redis/redis.sock
+(If you see the file, LiteSpeed can see it too!)
+
+A Quick Note on "Global Key Prefix"
+Since you are using multiple sites, remember that the "Global Key Prefix" in LiteSpeed settings is what keeps Site A's cache from "clobbering" Site B's cache. Even though they share the same Redis socket and memory pool, the 7900X will sort through those prefixes with zero latency.
