@@ -8,9 +8,6 @@ services:
     # Enables io_uring for Ryzen performance and prevents "Bad magic header" crashes
     security_opt:
       - seccomp:unconfined
-    cpuset: "0,1"
-    sysctls:
-      - net.core.somaxconn=65535
     command:
       - "mariadbd"
       - "--thread-cache-size=${THREAD_CACHE_SIZE:-50}"
@@ -25,16 +22,15 @@ services:
       - "--sort-buffer-size=2M"
       - "--tmp-table-size=48M"
       - "--max-heap-table-size=48M"
-      - "--innodb-read-io-threads=2"
-      - "--innodb-write-io-threads=2"
-      - "--innodb-io-capacity=4000"
-      - "--innodb-io-capacity-max=8000"
+      - "--innodb-read-io-threads=4"
+      - "--innodb-write-io-threads=4"
+      - "--innodb-io-capacity=2000"
+      - "--innodb-io-capacity-max=4000"
       - "--innodb-flush-neighbors=0"
-      - "--innodb-data-file-buffering=OFF"
-      - "--innodb-log-file-buffering=OFF"
-      - "--innodb-data-file-write-through=OFF"
-      - "--innodb-log-file-write-through=OFF"
       - "--performance-schema=0"
+      - "--skip-name-resolve=1"
+      - "--innodb-buffer-pool-load-at-startup=ON"
+      - "--innodb-buffer-pool-dump-at-shutdown=ON"
     deploy:
       resources:
         limits:
@@ -53,10 +49,6 @@ services:
     restart: always
     stop_grace_period: 30s
     shm_size: '512mb'
-    cpuset: "0,1"
-    sysctls:
-      - net.core.somaxconn=65535
-      - net.ipv4.tcp_fastopen=3
     deploy:
       resources:
         reservations:
@@ -67,13 +59,18 @@ services:
       TZ: ${TIMEZONE:-Pacific/Honolulu}
  
     volumes:
-      - ./lsws/php/php.ini:/usr/local/lsws/${LSPHP_NAME:-lsphp85}/etc/php/${PHP_VERSION:-8.5}/litespeed/php.ini
+      # THE MASTER CONFIG (Fixes disappearing VHosts)
+      - ./lsws/conf:/usr/local/lsws/conf
+      
+      # THE ADMIN CONFIG (Saves your passwords)
       - ./lsws/admin-conf:/usr/local/lsws/admin/conf
+      
+      # REST OF YOUR MAPPINGS
+      - ./lsws/php/php.ini:/usr/local/lsws/${LSPHP_NAME:-lsphp85}/etc/php/${PHP_VERSION:-8.5}/litespeed/php.ini
       - ./bin/container:/usr/local/bin
       - ./sites:/var/www/vhosts/
       - ./acme:/root/.acme.sh/
       - ./logs:/usr/local/lsws/logs/
-      - ./redis/run:/var/run/redis
     ports:
       - "80:80"
       - "443:443"
@@ -87,7 +84,6 @@ services:
     image: phpmyadmin:latest
     container_name: phpmyadminnao
     restart: "no"
-    cpuset: "0,1"
     profiles:
       - manual
     environment:
@@ -100,15 +96,12 @@ services:
     networks:
       - wp_network
 
-  # --- 4. Cache (Redis Optimized) ---
+   # --- 4. Cache (Redis Optimized) ---
   redis:
-    image: ${REDIS_IMAGE:-redis:8}
+    image: ${REDIS_IMAGE:-redis:8.4.0}
     container_name: redis
     restart: always
-    cpuset: "0,1"
-    sysctls: 
-      - net.core.somaxconn=65535
-    entrypoint: >
+    command: >
       sh -c "
       rm -f /var/run/redis/redis.sock && 
       exec redis-server 
