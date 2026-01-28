@@ -5,9 +5,10 @@ services:
     container_name: mariadb
     restart: always
     stop_grace_period: 1m
-    # Enables io_uring for Ryzen performance and prevents "Bad magic header" crashes
+    logging:
+      driver: none            # CRITICAL: Reduces I/O interrupts on 2-core VPS
     security_opt:
-      - seccomp:unconfined
+      - seccomp:unconfined    # Required for io_uring speed
     command:
       - "mariadbd"
       - "--thread-cache-size=${THREAD_CACHE_SIZE:-50}"
@@ -18,19 +19,12 @@ services:
       - "--innodb-flush-log-at-trx-commit=${DB_FLUSH_COMMIT:-2}"
       - "--table-definition-cache=1400"
       - "--table-open-cache=2800"
-      - "--join-buffer-size=2M"
-      - "--sort-buffer-size=2M"
-      - "--tmp-table-size=48M"
-      - "--max-heap-table-size=48M"
       - "--innodb-read-io-threads=4"
       - "--innodb-write-io-threads=4"
-      - "--innodb-io-capacity=2000"
-      - "--innodb-io-capacity-max=4000"
-      - "--innodb-flush-neighbors=0"
+      - "--innodb-io-capacity=1000"      # LOWERED: Prevents "Interrupt Storms"
+      - "--innodb-io-capacity-max=2000"
       - "--performance-schema=0"
       - "--skip-name-resolve=1"
-      - "--innodb-buffer-pool-load-at-startup=ON"
-      - "--innodb-buffer-pool-dump-at-shutdown=ON"
     deploy:
       resources:
         limits:
@@ -57,20 +51,15 @@ services:
           memory: ${OLS_MEM_LIMIT:-3500M}
     environment:
       TZ: ${TIMEZONE:-Pacific/Honolulu}
- 
     volumes:
-      # THE MASTER CONFIG (Fixes disappearing VHosts)
       - ./lsws/conf:/usr/local/lsws/conf
-      
-      # THE ADMIN CONFIG (Saves your passwords)
       - ./lsws/admin-conf:/usr/local/lsws/admin/conf
-      
-      # REST OF YOUR MAPPINGS
       - ./lsws/php/php.ini:/usr/local/lsws/${LSPHP_NAME:-lsphp85}/etc/php/${PHP_VERSION:-8.5}/litespeed/php.ini
       - ./bin/container:/usr/local/bin
       - ./sites:/var/www/vhosts/
       - ./acme:/root/.acme.sh/
       - ./logs:/usr/local/lsws/logs/
+      - ./redis/run:/var/run/redis
     ports:
       - "80:80"
       - "443:443"
@@ -92,15 +81,13 @@ services:
       UPLOAD_LIMIT: 512M
       MAX_EXECUTION_TIME: 600
     ports:
-      - "${PMA_PORT:-8080}:80"
-    networks:
-      - wp_network
-
-   # --- 4. Cache (Redis Optimized) ---
+  # --- 4. Cache (Redis Optimized) ---
   redis:
     image: ${REDIS_IMAGE:-redis:8.4.0}
     container_name: redis
     restart: always
+    logging:
+      driver: none            # Reduces overhead on the bridge
     command: >
       sh -c "
       rm -f /var/run/redis/redis.sock && 
@@ -108,19 +95,10 @@ services:
       --port 6379 
       --unixsocket /var/run/redis/redis.sock 
       --unixsocketperm 777 
-      --tcp-backlog 65535 
-      --databases 64 
       --maxmemory ${REDIS_MAX_MEMORY:-128mb} 
       --maxmemory-policy allkeys-lru 
       --save '' 
-      --appendonly no 
-      --timeout 0
-      --maxclients 20000
-      --hz 100
-      --activedefrag yes
-      --lazyfree-lazy-eviction yes
-      --lazyfree-lazy-expire yes
-      --lazyfree-lazy-server-del yes
+      --appendonly no
       "
     deploy:
       resources:
