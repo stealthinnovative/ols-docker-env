@@ -11,18 +11,19 @@ services:
       - seccomp:unconfined    # Required for io_uring speed
     command:
       - "mariadbd"
-      - "--thread-cache-size=${THREAD_CACHE_SIZE:-50}"
+      - "--thread-cache-size=${THREAD_CACHE_SIZE:-128}"
       - "--max-allowed-packet=${DB_MAX_PACKET:-512M}"
       - "--max-connections=${MARIADB_MAX_CONNS:-151}"
       - "--innodb-buffer-pool-size=${DB_BUFFER_POOL:-512M}"
-      - "--innodb-log-file-size=${DB_LOG_FILE:-256M}"
+      - "--innodb-log-file-size=${DB_LOG_FILE:-512M}"
       - "--innodb-flush-log-at-trx-commit=${DB_FLUSH_COMMIT:-2}"
+      - "--innodb-adaptive-hash-index=1" # SPEEDS UP: Creates internal shortcuts for frequent joins
       - "--table-definition-cache=1400"
       - "--table-open-cache=2800"
-      - "--innodb-read-io-threads=4"
-      - "--innodb-write-io-threads=4"
-      - "--innodb-io-capacity=1000"      # LOWERED: Prevents "Interrupt Storms"
-      - "--innodb-io-capacity-max=2000"
+      - "--innodb-read-io-threads=2"
+      - "--innodb-write-io-threads=2"
+      - "--innodb-io-capacity=2000"      # LOWERED: Prevents "Interrupt Storms"
+      - "--innodb-io-capacity-max=4000"
       - "--performance-schema=0"
       - "--skip-name-resolve=1"
     deploy:
@@ -48,7 +49,7 @@ services:
         reservations:
           memory: ${OLS_MEM_RESERVE:-2G} 
         limits:
-          memory: ${OLS_MEM_LIMIT:-3500M}
+          memory: ${OLS_MEM_LIMIT:-4000M}
     environment:
       TZ: ${TIMEZONE:-Pacific/Honolulu}
     volumes:
@@ -81,6 +82,7 @@ services:
       UPLOAD_LIMIT: 512M
       MAX_EXECUTION_TIME: 600
     ports:
+
   # --- 4. Cache (Redis Optimized) ---
   redis:
     image: ${REDIS_IMAGE:-redis:8.4.0}
