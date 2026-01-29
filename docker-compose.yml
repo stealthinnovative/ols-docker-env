@@ -69,7 +69,7 @@ services:
     networks:
       - wp_network
 
-  # --- 3. Database Management ---
+# --- 3. Database Management ---
   phpmyadmin:
     image: phpmyadmin:latest
     container_name: phpmyadminnao
@@ -82,6 +82,9 @@ services:
       UPLOAD_LIMIT: 512M
       MAX_EXECUTION_TIME: 600
     ports:
+      - "8080:80"
+    networks:
+      - wp_network
 
   # --- 4. Cache (Redis Optimized) ---
   redis:
